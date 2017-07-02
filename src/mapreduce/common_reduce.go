@@ -1,5 +1,14 @@
 package mapreduce
 
+import (
+	"log"
+	"os"
+	"encoding/json"
+	"io"
+	"fmt"
+
+)
+
 // doReduce manages one reduce task: it reads the intermediate
 // key/value pairs (produced by the map phase) for this task, sorts the
 // intermediate key/value pairs by key, calls the user-defined reduce function
@@ -43,4 +52,54 @@ func doReduce(
 	// }
 	// file.Close()
 	//
+
+	// the input is a list of key->value pairs
+	// read files and store them in map[string][]string
+	m := make(map[string][]string)
+	for i := 0; i < nMap; i++ {
+		fileName := reduceName(jobName, i, reduceTaskNumber)
+		f, err := os.Open(fileName)
+		defer f.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err == io.EOF {
+				break
+			} else if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println("libochen: ", kv.Key, " ", kv.Value)
+			if kv.Value == "" {
+				fmt.Println("equal")
+			}
+			m[kv.Key] = append(m[kv.Key], kv.Value)
+			fmt.Println("want to debug: ", m[kv.Key])
+		}
+	}
+
+	// Invoke reduce function for each key, and write res to output file.
+	outputFile := mergeName(jobName, reduceTaskNumber)
+	fmt.Println("hello:", outputFile)
+	f, err := os.Create(outputFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(m)
+	for k, v := range m {
+		res := reduceF(k, v)
+		fmt.Println("res is ", res, " k is ", k, " v is ", v)
+		// I made a big mistake here
+		// if err := enc.Encode(&res); err != nil {
+		if err := enc.Encode(&KeyValue{k, res}); err != nil {
+			log.Fatal(err)
+		}
+	}
 }

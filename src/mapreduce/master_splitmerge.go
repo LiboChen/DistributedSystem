@@ -16,6 +16,7 @@ func (mr *Master) merge() {
 	kvs := make(map[string]string)
 	for i := 0; i < mr.nReduce; i++ {
 		p := mergeName(mr.jobName, i)
+		fmt.Println("libo merge: ", p)
 		fmt.Printf("Merge: read %s\n", p)
 		file, err := os.Open(p)
 		if err != nil {

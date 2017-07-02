@@ -27,7 +27,7 @@ func MapFunc(file string, value string) (res []KeyValue) {
 	debug("Map %v\n", value)
 	words := strings.Fields(value)
 	for _, w := range words {
-		kv := KeyValue{w, ""}
+		kv := KeyValue{w, " "}
 		res = append(res, kv)
 	}
 	return
@@ -38,7 +38,7 @@ func ReduceFunc(key string, values []string) string {
 	for _, e := range values {
 		debug("Reduce %s %v\n", key, e)
 	}
-	return ""
+	return key
 }
 
 // Checks input file agaist output file: each input number should show up
