@@ -17,8 +17,13 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
+import (
+	"sync"
+  "labrpc"
+	"time"
+	"math/rand"
+	"fmt"
+)
 
 // import "bytes"
 // import "encoding/gob"
@@ -71,6 +76,10 @@ type Raft struct {
 	commitIndex int
 	lastApplier int
 
+	// use channel !!
+	heartbeatCH chan bool
+	voteCH chan bool
+	voteCount int
 }
 
 // return currentTerm and whether this server
@@ -147,11 +156,13 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
   // Your code here (2A, 2B).
+	fmt.Printf("task %v received vote request from task %v\n", rf.me, args.CandidateId)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		fmt.Printf("task %v rejects task %v because of smaller term\n", rf.me, args.CandidateId)
 		return
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
@@ -161,26 +172,40 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(args.LastLogTerm == curLogTerm && args.LastLogIndex >= curLastLogIndex) {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
+				fmt.Printf("task %v approves task %v\n", rf.me, args.CandidateId)
 				return
 		}
 	}
+	fmt.Printf("task %v rejects task %v because of other reasons\n", rf.me, args.CandidateId)
 	reply.VoteGranted = false
 	return
 }
 
 
-type AppendEntriesArgs struct {}
+type AppendEntriesArgs struct {
+	Term int
+}
 
-type AppendEntriesReply struct {}
+type AppendEntriesReply struct {
+	Term int
+}
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// for 2A first.
+	fmt.Printf("task %v received heartbeat from task %v\n", rf.me, args.Term)
+	rf.heartbeatCH <- true
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+	}
+	// Remember to update own term.
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+	}
 	if rf.state == candidate {
 		rf.state = follower
 	}
-	// reset timeout for follwer??
+	rf.mu.Unlock()
 }
 
 //
@@ -214,11 +239,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if ok {
+		if reply.VoteGranted {
+			rf.mu.Lock()
+			rf.voteCount++
+			rf.mu.Unlock()
+			if rf.state == candidate && rf.voteCount + 1 > len(rf.peers) / 2 {
+				rf.voteCH <- true
+			}
+		} else if reply.Term > rf.currentTerm {
+			rf.mu.Lock()
+			rf.currentTerm = reply.Term
+			rf.state = follower
+			rf.mu.Unlock()
+		}
+	}
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	if ok {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = follower
+		}
+		rf.mu.Unlock()
+	}
 	return ok
 }
 
@@ -241,7 +289,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 	return index, term, isLeader
 }
 
@@ -255,6 +302,68 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func generateTimeOut() time.Duration {
+	return time.Duration(rand.Intn(200) + 500) * time.Millisecond
+}
+
+func(rf *Raft) leaderAction() {
+	for i := 0; i < len(rf.peers) && i != rf.me; i++ {
+		req := &AppendEntriesArgs {}
+		resp := &AppendEntriesReply{}
+		rf.sendAppendEntries(i, req, resp)
+	}
+	// send heartbeat every 100ms.
+	time.Sleep(10 * time.Millisecond)
+}
+
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	// reset voteCount before each startElection
+	rf.voteCount = 0
+	rf.currentTerm++
+	req := &RequestVoteArgs {
+		Term: rf.currentTerm,
+		CandidateId: rf.me,
+		LastLogIndex: len(rf.logs) - 1,
+		LastLogTerm: rf.logs[len(rf.logs) - 1].term,
+	}
+	rf.mu.Unlock()
+
+	gochan := make(chan int, len(rf.peers) - 1)
+	for i := 0; i < len(rf.peers) && i != rf.me; i++ {
+		gochan <- i
+		go func() {
+			resp := &RequestVoteReply{}
+			// set resp.Term??
+			temp := <- gochan
+			rf.sendRequestVote(temp, req, resp)
+		}()
+	}
+}
+
+func(rf *Raft) candidateAction() {
+	for {
+		rf.startElection()
+		timeout := generateTimeOut()
+		select {
+		case <- rf.heartbeatCH:
+			// Convert to follower
+			rf.mu.Lock()
+			rf.state = follower
+			rf.mu.Unlock()
+			return
+		case isLeader := <- rf.voteCH:
+			if isLeader {
+				rf.mu.Lock()
+				rf.state = leader
+				rf.mu.Unlock()
+				return
+			}
+		case <- time.After(timeout):
+			continue
+		}
+	}
+}
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -279,6 +388,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.voteCount = 0
+	rf.logs = make([]Log, len(peers), len(peers))
+	rf.heartbeatCH = make(chan bool)
+	rf.voteCH = make(chan bool)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -290,26 +403,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			state := rf.state
 			rf.mu.Unlock()
 
-			// If it's a leader, periodically send heartbeat RPC.
 			if state == leader {
-				// every 0.1 seconds.
-				
-				rf.sendAppendEntries()
+				fmt.Printf("start leader: %v, term: %v\n", rf.me, rf.currentTerm)
+				rf.leaderAction()
+				fmt.Printf("end leader: %v, term: %v\n", rf.me, rf.currentTerm)
 			}
 
 			if state == follower {
-
-
+				fmt.Printf("start follower: %v\n", rf.me)
+				timeout := generateTimeOut()
+				select {
+				case <- rf.heartbeatCH:
+				case <- time.After(timeout):
+					rf.mu.Lock()
+					if rf.state != leader {
+						rf.state = candidate
+					}
+					rf.mu.Unlock()
+				}
+				fmt.Printf("end follower: %v\n", rf.me)
 			}
 
 			if state == candidate {
-
-
+				fmt.Printf("start candidate: %v, term: %v\n", rf.me, rf.currentTerm)
+				rf.candidateAction()
+				fmt.Printf("end candidate: %v, term: %v\n", rf.me, rf.currentTerm)
 			}
 		}
-
 	}()
-
 
 	return rf
 }

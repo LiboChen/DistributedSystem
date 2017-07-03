@@ -302,7 +302,9 @@ func (cfg *config) checkTerms() int {
 			xterm, _ := cfg.rafts[i].GetState()
 			if term == -1 {
 				term = xterm
+				fmt.Printf("term is: %v\n", term)
 			} else if term != xterm {
+				fmt.Printf("term is: %v, xterm is: %v\n", term, xterm)
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}
