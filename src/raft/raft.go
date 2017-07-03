@@ -169,7 +169,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		fmt.Printf("task %v rejects task %v because of smaller term\n", rf.me, args.CandidateId)
 		return
 	}
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId || args.Term > rf.currentTerm {
 		curLastLogIndex := len(rf.logs) - 1
 		curLogTerm := rf.logs[curLastLogIndex].term
 		if args.LastLogTerm > curLogTerm ||
@@ -311,7 +311,7 @@ func (rf *Raft) Kill() {
 }
 
 func generateTimeOut() time.Duration {
-	return time.Duration(rand.Intn(200) + 500) * time.Millisecond
+	return time.Duration(rand.Intn(300) + 200) * time.Millisecond
 }
 
 func(rf *Raft) leaderAction() {
@@ -322,6 +322,7 @@ func(rf *Raft) leaderAction() {
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
+	fmt.Printf("task %v: start another round of election\n", rf.me)
 	// reset voteCount before each startElection
 	rf.voteCount = 0
 	// this is important. start a new round of request vote, to resolve multiple
