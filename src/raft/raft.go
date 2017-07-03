@@ -28,8 +28,6 @@ import (
 // import "bytes"
 // import "encoding/gob"
 
-
-
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -123,9 +121,13 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+
+	// for 2A only
+	if len(rf.logs) == 0 {
+		dummyLog := new(Log) // create a dummy log for convenience
+		rf.logs = []Log{*dummyLog}
 	}
+	fmt.Println(rf.logs)
 }
 
 
@@ -156,7 +158,9 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
   // Your code here (2A, 2B).
-	fmt.Printf("task %v received vote request from task %v\n", rf.me, args.CandidateId)
+	fmt.Printf("task %v (term: %v, votedFor: %v, lastLogTerm: %v, lastLogIndex: %v), received vote request from task %v (term: %v, lastLogTerm: %v, lastLogIndex: %v)\n",
+		rf.me, rf.currentTerm, rf.votedFor, len(rf.logs) - 1, rf.logs[len(rf.logs)-1].term,
+		args.CandidateId, args.Term, args.LastLogTerm, args.LastLogIndex)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
@@ -172,6 +176,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(args.LastLogTerm == curLogTerm && args.LastLogIndex >= curLastLogIndex) {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
+				// remember to change state to follower if it's leader or candidate.
+				rf.state = follower
+				rf.currentTerm = args.Term
 				fmt.Printf("task %v approves task %v\n", rf.me, args.CandidateId)
 				return
 		}
@@ -192,7 +199,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// for 2A first.
-	fmt.Printf("task %v received heartbeat from task %v\n", rf.me, args.Term)
+	// fmt.Printf("task %v received heartbeat with term %v\n", rf.me, args.Term)
 	rf.heartbeatCH <- true
 	rf.mu.Lock()
 	if rf.currentTerm > args.Term {
@@ -200,6 +207,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// Remember to update own term.
 	if rf.currentTerm < args.Term {
+		rf.votedFor = -1 // remmeber to update this bit whenever term increases.
 		rf.currentTerm = args.Term
 	}
 	if rf.state == candidate {
@@ -307,20 +315,22 @@ func generateTimeOut() time.Duration {
 }
 
 func(rf *Raft) leaderAction() {
-	for i := 0; i < len(rf.peers) && i != rf.me; i++ {
-		req := &AppendEntriesArgs {}
-		resp := &AppendEntriesReply{}
-		rf.sendAppendEntries(i, req, resp)
-	}
 	// send heartbeat every 100ms.
 	time.Sleep(10 * time.Millisecond)
+	go rf.BroadcastAppendEntries()
 }
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	// reset voteCount before each startElection
 	rf.voteCount = 0
+	// this is important. start a new round of request vote, to resolve multiple
+	// candidates problem.
 	rf.currentTerm++
+	// remember to reset votedFor to rf.me. There is a case when old leader fails,
+	// two other replicas both become candidate, but refuse to approve the other
+	// task due to unreset votedFor bit (equal to the candidate ID of the failed one).
+	rf.votedFor = rf.me
 	req := &RequestVoteArgs {
 		Term: rf.currentTerm,
 		CandidateId: rf.me,
@@ -341,6 +351,14 @@ func (rf *Raft) startElection() {
 	}
 }
 
+func (rf *Raft) BroadcastAppendEntries() {
+	for i := 0; i < len(rf.peers) && i != rf.me; i++ {
+		req := &AppendEntriesArgs {rf.currentTerm}
+		resp := &AppendEntriesReply{}
+		rf.sendAppendEntries(i, req, resp)
+	}
+}
+
 func(rf *Raft) candidateAction() {
 	for {
 		rf.startElection()
@@ -357,6 +375,7 @@ func(rf *Raft) candidateAction() {
 				rf.mu.Lock()
 				rf.state = leader
 				rf.mu.Unlock()
+				go rf.BroadcastAppendEntries()
 				return
 			}
 		case <- time.After(timeout):
@@ -389,7 +408,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.voteCount = 0
-	rf.logs = make([]Log, len(peers), len(peers))
 	rf.heartbeatCH = make(chan bool)
 	rf.voteCH = make(chan bool)
 
@@ -410,7 +428,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 
 			if state == follower {
-				fmt.Printf("start follower: %v\n", rf.me)
+				fmt.Printf("start follower: %v, term: %v\n", rf.me, rf.currentTerm)
 				timeout := generateTimeOut()
 				select {
 				case <- rf.heartbeatCH:
@@ -421,7 +439,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					}
 					rf.mu.Unlock()
 				}
-				fmt.Printf("end follower: %v\n", rf.me)
+				fmt.Printf("end follower: %v, term: %v\n", rf.me, rf.currentTerm)
 			}
 
 			if state == candidate {
